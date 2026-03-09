@@ -1,4 +1,4 @@
-install.packages(c("tidyverse", "janitor", "fs", "curl"))
+#install.packages(c("tidyverse", "janitor", "fs", "curl"))
 
 
 library(tidyverse)
@@ -6,6 +6,7 @@ library(janitor)
 library(fs)
 library(curl)
 
+#############################################################################
 #STEP 2: PATIENT DATA
 
 #ERIK"S CODE
@@ -49,6 +50,7 @@ patients <- patients %>%
 # Inspect the cleaned patient dataset
 glimpse(patients)
 
+#############################################################################
 #PART 3 Expectations/validations
 #Now we're running some checks based on what we expect from the data
 #for example: dates should be realistic, death should not be before birth
@@ -196,6 +198,7 @@ export_report(checks, "patient_validation.html")
 file.exists("patient_validation.html")
 
 
+#############################################################################
 #PART 3.1
 #check how many of each category we have
 patients %>% 
@@ -264,6 +267,7 @@ patients %>%
 patients <- patients %>%
   mutate(across(all_of(fctr_candidates), as.factor))
 
+#############################################################################
 #part 3.2: unusual combinations
 #the purpose here is to check whetehr some combinations of variables are very rare
 
@@ -282,7 +286,8 @@ combination_counts <- patients %>%
 # we can inspect whether some combinations are very rare
 combination_counts
 
-#the results
+#the results (wouldnt usually put this in for privacy reason)
+#just put it in for pedagological reasons 
   #gender race     state             N
   # <fct>  <fct>    <fct>         <int>
  #1 Male   native   Alabama           1
@@ -311,6 +316,7 @@ patients <- patients %>%
     race = forcats::fct_lump_prop(race, prop = 0.05)
   )
 
+#############################################################################
 #Part 4
 #load the payer_transitions dataset from inside the zip archive
 #this dataset contains information about when patients moved 
@@ -374,3 +380,241 @@ patients %>%
     x = "Age (years)",
     y = "Number of patients"
   )
+
+
+#############################################################################
+#PART 5: NAMES
+#we want to replace missing prefix and middle values with empty strings
+#create a full_name from prefix, first, miffle, last and optional suffix
+#trim trailing spcaes ofr character collumns
+#remoce duplicated spaces inside full_name
+#delete the old name columns afterwards
+
+#when you combine name parts with past(), missing or empty pieces can create ugly resutls like:
+#extra spaces at the start or end
+#double spaces in the middle
+#awakrd suffix handlking
+
+#goal: build one clean full_name collumn for later use
+
+patients <- patients %>%
+  mutate(
+    # replace missing prefix and middle values with empty strings so they do not appear as NA inside the final name
+    prefix = tidyr::replace_na(as.character(prefix), ""),
+    middle = tidyr::replace_na(as.character(middle), ""),
+    suffix = tidyr::replace_na(as.character(suffix), "")
+  ) %>%
+  mutate(
+    # combine name parts into one string
+    # if suffix exists, add it with a comma
+    full_name = if_else(
+      suffix != "",
+      paste(prefix, first, middle, last, paste0(", ", suffix)),
+      paste(prefix, first, middle, last)
+    ),
+  
+
+   # collapse repeated spaces using regex
+full_name = stringr::str_replace_all(full_name, " +", " "),
+
+# remove leading and trailing spaces
+full_name = stringr::str_trim(full_name)
+  )
+
+
+#check the cleaned names
+patients %>% select(full_name) %>% head(10)
+
+#remove original name columns
+patients <- patients %>%
+  select(-prefix, -first, -middle, -last, -suffix, -maiden)
+
+#check
+names(patients) #no longer see prefeix, first, etc
+
+
+#############################################################################
+#Part 6: Necessary Data
+#original data set has drivers collumn
+#However, with the information currently available, the only
+# relevant thing seems to be whether the patient has a driver's
+# license or not.
+
+
+patients <- patients %>%
+  mutate(
+    driver = !is.na(drivers)
+  ) %>%
+  #remove the original drivers column after createing the logical collumn
+  select(-drivers)
+
+#check trua nd false
+patients %>% count(driver)
+
+#playing around with leaflet
+install.packages("leaflet")
+library(leaflet)
+leaflet(patients) |>
+  addTiles() |>
+  addCircleMarkers(~lon, ~lat, radius = 2)
+
+#Based on this data, would it be reasonable to make statistical inference for the whole of USA? For
+#the whole world?
+#Not all of the US, it's mainly the south and Alaska
+
+
+#Part 7: Linkage
+#if were interested in reasons for procedures performed on adults over the years, for exmaple
+#we need to:
+#load the procedures data
+#keep only collumns needed
+#extract the year of each procedure
+#join procedures with the patients table using patient ID
+#calculate whetehr the patient was 18 or older at teh time of the procedure
+#count procedure reasons by year 
+
+#we need from procedures:
+#"patients" for linkage
+#"reasoncode_icd10" for the reason
+#"start" to calculate age and summary by year
+
+#we need to drop rows where "reasoncode_icd10" is missing 
+#then it joins "procedures" to "patients" on 
+#"procedures$patient" and "patients$id"
+
+#trying it just with dplyr:
+#read the procedures file
+procedures <- readr::read_csv(
+  unz("data.zip", "data-fixed/procedures.csv"),
+  show_col_types = FALSE
+)
+
+#keep only columns i need
+#linkage key
+#reason code
+#date
+procedures <- procedures %>%
+  select(patient, reasoncode_icd10, start) %>%
+  #remove rows without reason code
+  filter(!is.na(reasoncode_icd10))
+
+#create a year variable
+procedures <- procedures %>%
+  mutate(
+    start = as.Date(start),
+    year = lubridate::year(start)
+  ) %>%
+  #remove start column 
+  select(-start)
+
+#join procedures with patient birthdate 
+proc_linked <- procedures %>%
+  left_join(
+    patients %>% select(id, birthdate),
+    by = c("patient" = "id")
+  )
+
+#calculate age at procedure and keep adults 
+#adults are people who were atleast 18 at teh time of the proceudre
+proc_n_adults <- proc_linked %>%
+  mutate(
+    age_at_procedure = year - lubridate::year(birthdate)
+  ) %>%
+  filter(age_at_procedure >= 18) %>%
+  count(reasoncode_icd10, year, name = "N")
+
+#now proc_n_adults
+#contains reasoncode_icd10, year, N
+#where N is the number of procedures with that reaosn among adults in that year
+#the same patient might have had more than one prodcuere so these are procedure counts, not unique patient counts 
+
+#Add a human-readable ICD-10 descriptions 
+#the variable reasoncode_icd10 ontains only ICD-10 codes,
+# which are not very informative for readers.
+
+#The decoder package contains a lookup table (icd10se)
+# that maps ICD-10 codes to descriptive condition names.
+
+# I join this table to our procedure counts so that each
+# ICD-10 code is accompanied by a readable description.
+install.packages("decoder")
+library(decoder)
+cond_by_year <- proc_n_adults %>%
+  left_join(
+    decoder::icd10se %>% 
+      mutate(key = as.character(key)),
+    by = c("reasoncode_icd10" = "key")
+  )
+
+#visualization: five most common coditions overall:
+
+#The cond_by_year table contains:
+# reasoncode_icd10 = ICD-10 code
+#  year             = calendar year
+# N                = number of procedures
+#  value            = human-readable condition description
+
+#first we identify the 5 most common conditionns overall by summing procedure counts across all years 
+
+#get the top 5 conditions overall
+top5 <- cond_by_year %>%
+  group_by(value) %>%
+
+  #add up the counts across all years for each condition
+  summarise(N = sum(N), .groups = "drop") %>%
+  
+  #sort from most common to least common
+  arrange(desc(N)) %>%
+  
+  #keep only the five most common
+  slice_head(n = 5) %>%
+  #extract condiction names into a vector
+  pull(value)
+
+#plot only those top 5 
+cond_by_year %>%
+  filter(value %in% top5) %>%
+  ggplot(aes(x = year, y = N, color = value)) +
+
+  #draw one line per condition over time
+  geom_line() +
+  
+  #legend to bottom 
+  theme(legend.position = "bottom") +
+  
+  #legent formatting, into one collumn 
+  guides(color = guide_legend(ncol = 1)) +
+  
+  #wrap condition labels 
+  scale_color_discrete(
+    labels = function(x) stringr::str_wrap(x, width = 40)
+  ) +
+  labs(
+    title = "Five most common conditions overall",
+    x = "Year",
+    y = "Number of procedures",
+    color = "Condition"
+  )
+
+#questions for 7
+
+#Wath happens in the end? Is it really reasonable to include tha last year (we were looking at
+#the assumed data extraction date earlier)
+#Not necessarily. The last year may be incomplete because the dataset was extracted before the end of the year, so procedure counts may appear artificially lower.
+
+#What happened early in history? 
+# The earliest years may contain incomplete or less reliable records. 
+# Lower counts in early years may reflect missing or poorly recorded data rather than fewer procedures.
+
+
+#Does this visualisation tell us anything? 
+#It shows how the number of procedures changed over time, 
+# but it only reflects raw counts and does not necessarily indicate changes in disease prevalence.
+
+#Do we need to standardize the numbers?
+#Yes. To properly compare across years, counts should ideally be standardized by population size or the number of patients in the dataset.
+
+
+#Are patients sicker today or do they get more treatment for conditions which might have been
+#undertreated in the past?
+#Not necessarily. Higher procedure counts may reflect improved diagnosis, better access to healthcare, or increased treatment rather than greater disease severity.

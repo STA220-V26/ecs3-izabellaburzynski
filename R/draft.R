@@ -194,3 +194,183 @@ export_report(checks, "patient_validation.html")
 
 #check that the file was actually created
 file.exists("patient_validation.html")
+
+
+#PART 3.1
+#check how many of each category we have
+patients %>% 
+  count(marital)
+#results:
+#marital     n
+#  <chr>   <int>
+#1 D         635
+#2 M        2772
+#3 S         906
+#4 W         205
+#5 NA       2333
+
+#change the reasonable things into factors with labels
+
+patients <- patients %>%
+  mutate(
+    
+    # change marital status codes to descriptive categories
+    marital = factor(
+      marital,
+      levels = c("S", "M", "D", "W"),
+      labels = c("Single", "Married", "Divorced", "Widowed")
+    ),
+    
+    # change gender codes to readable labels
+    gender = factor(
+      gender,
+      levels = c("M", "F"),
+      labels = c("Male", "Female")
+    )
+  )
+
+
+#check the labels now
+patients %>% count(marital)
+patients %>% count(gender)
+
+#find all other reasonable collumns
+
+#find the candidate collumns
+#find the character columns with less than 10 unqiue values
+
+fctr_candidates <- patients %>%
+  select(where(is.character)) %>%
+  summarise(across(everything(), n_distinct)) %>%
+  pivot_longer(everything()) %>%
+  filter(value < 10) %>%
+  pull(name)
+
+#show all the unqiue values for those variables
+patients %>%
+  select(all_of(fctr_candidates)) %>%
+  summarise(across(everything(), ~ paste(unique(.), collapse = ", "))) %>%
+  glimpse()
+
+#the results:
+#$ prefix    <chr> "Mr., Mrs., NA, Ms."
+#$ suffix    <chr> "PhD, NA, JD, MD"
+#$ race      <chr> "white, black, native, hawaiian, asian, other"
+#$ ethnicity <chr> "nonhispanic, hispanic"
+#$ state     <chr> "Arkansas, Alaska, California, Massachusetts,…
+
+
+#convert those variables into factors:
+patients <- patients %>%
+  mutate(across(all_of(fctr_candidates), as.factor))
+
+#part 3.2: unusual combinations
+#the purpose here is to check whetehr some combinations of variables are very rare
+
+#for example, one or two patients bleong to certain combination of gender race, state, then those individuals are easier to identify
+
+#this important for ethics! especticlaly is reported later in figures
+
+#count how many patients belong to each combination of gender, erace and state
+combination_counts <- patients %>%
+  count(gender, race, state, name = "N") %>%
+  
+  # sort from the smallest groups to the largest groups
+  arrange(N)
+
+# print the result 
+# we can inspect whether some combinations are very rare
+combination_counts
+
+#the results
+  #gender race     state             N
+  # <fct>  <fct>    <fct>         <int>
+ #1 Male   native   Alabama           1
+ #2 Male   native   Massachusetts     1
+ #3 Female hawaiian Alabama           2
+ #4 Female hawaiian Arkansas          3
+ #5 Female native   Arkansas          4
+ #6 Female other    Arkansas          4
+ #7 Male   other    California        5
+ #8 Female native   Massachusetts     5
+
+#collect all 
+rare_combinations <- combination_counts %>%
+  filter(N <= 5)
+
+rare_combinations
+
+
+#combine the rare race groups
+#basically we want to recladdify the race variable to reduce the number of rare gorups
+#fct_lump_prop() keeps categories that make up at least 5% of the observations and combines smaller categries into "Other"
+
+#this reduces discloser risk and mmakes later summaries easier to interpret
+patients <- patients %>%
+  mutate(
+    race = forcats::fct_lump_prop(race, prop = 0.05)
+  )
+
+#Part 4
+#load the payer_transitions dataset from inside the zip archive
+#this dataset contains information about when patients moved 
+#between insurance payers over tine
+
+payer_transitions <- readr::read_csv(
+  unz("data.zip", "data-fixed/payer_transitions.csv"),
+  show_col_types = FALSE
+)
+
+#determine the assumed dataset extract date
+#the extract date should be the latest start_date in the payer-transitions dataset
+
+extract_date <- payer_transitions %>%
+  #take the maximum start date 
+  summarise(last_date = max(start_date, na.rm = TRUE)) %>%
+  pull(last_date) %>%
+  as.Date()
+
+extract_date
+#result: [1] "2025-10-01 10:33:29 UTC"
+
+#next we want to caluclate patient age based on the dataset extract date
+#age is computer as the number of days between the extract date and the birthdate, divided by 365.25 to approximate the year 
+#floor() ensures we get the age in completed years 
+patients <- patients %>%
+  mutate(
+    age = floor(as.numeric(extract_date - birthdate) / 365.25)
+  )
+
+
+#DECEASED PATIENTS
+#the deceased patients should not get an age value 
+patients <- patients %>%
+  mutate(
+    age = if_else(
+      is.na(deathdate),
+      floor(as.numeric(extract_date - birthdate) / 365.25),
+      NA_real_
+    )
+  )
+
+#check the result
+patients %>% 
+  select(birthdate, deathdate, age) %>% 
+  glimpse()
+
+
+#make a histogram
+patients %>%
+  #first, remove all the deceased patients 
+  filter(is.na(deathdate)) %>%
+  
+  #we want to plot age
+  ggplot(aes(x = age)) +
+  
+  #group it into 5 year bins
+  geom_histogram(binwidth = 5) +
+  labs(
+    title = "Age distribution of living patients at data extract date",
+    x = "Age (years)",
+    y = "Number of patients"
+  )
